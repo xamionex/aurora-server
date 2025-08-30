@@ -1,0 +1,39 @@
+{
+  "name": "aurora-server",
+  "version": "1.0.0",
+  "main": "dist/main.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/main.js",
+    "dev": "ts-node src/main.ts",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/AuroraMirror/aurora-server.git"
+  },
+  "keywords": [
+    "git",
+    "server",
+    "repository",
+    "cache"
+  ],
+  "author": "AuroraMirror",
+  "license": "GPL-3.0",
+  "bugs": {
+    "url": "https://github.com/AuroraMirror/aurora-server/issues"
+  },
+  "homepage": "https://github.com/AuroraMirror/aurora-server#readme",
+  "dependencies": {
+    "express": "^5.1.0",
+    "sqlite": "^5.1.1",
+    "sqlite3": "^5.1.7"
+  },
+  "devDependencies": {
+    "@types/express": "^4.17.21",
+    "@types/node": "^20.10.0",
+    "@types/sqlite3": "^3.1.11",
+    "ts-node": "^10.9.0",
+    "typescript": "^5.3.0"
+  }
+}
