@@ -17,7 +17,7 @@ export class AURService {
   private async initializeDatabase(): Promise<void> {
     try {
       await this.packageDb.initialize();
-      
+
       await this.packageDb.fixZeroCounts();
     } catch (error) {
       console.error('Failed to initialize package database:', error);
@@ -176,62 +176,90 @@ export class AURService {
         }
       }
 
-      const gitProcess = spawn('git', ['clone', `https://aur.archlinux.org/${packageName}.git`, repoPath]);
+      const tryClone = (args: string[], source: string): Promise<boolean> => {
+        return new Promise((resolveClone) => {
+          console.log(`Attempting to clone ${packageName} from ${source}...`);
+          const gitProcess = spawn('git', args);
 
-      const timeout = setTimeout(() => {
-        gitProcess.kill('SIGKILL');
-        
+          const timeout = setTimeout(() => {
+            console.log(`Clone from ${source} timed out for ${packageName}`);
+            gitProcess.kill('SIGKILL');
+            resolveClone(false);
+          }, 30000);
+
+          gitProcess.on('close', (code: number) => {
+            clearTimeout(timeout);
+            if (code === 0) {
+              console.log(`Successfully cloned ${packageName} from ${source}`);
+            } else {
+              console.log(`Failed to clone ${packageName} from ${source}, exit code: ${code}`);
+            }
+            resolveClone(code === 0);
+          });
+
+          gitProcess.on('error', (error) => {
+            clearTimeout(timeout);
+            console.error(`Git process error for ${packageName} from ${source}:`, error);
+            resolveClone(false);
+          });
+        });
+      };
+
+      const validateRepo = (): boolean => {
+        const gitDir = path.join(repoPath, '.git');
+        const pkgbuildPath = path.join(repoPath, 'PKGBUILD');
+        const isValid = fs.existsSync(gitDir) && fs.existsSync(pkgbuildPath);
+        if (!isValid) {
+          console.log(`Repository validation failed for ${packageName}`);
+        }
+        return isValid;
+      };
+
+      // Try AUR first
+      tryClone(['clone', `https://aur.archlinux.org/${packageName}.git`, repoPath], 'AUR')
+      .then(async (aurSuccess) => {
+        if (aurSuccess && validateRepo()) {
+          resolve(true);
+          return;
+        }
+
+        // Cleanup failed AUR attempt
         if (fs.existsSync(repoPath)) {
           try {
             fs.rmSync(repoPath, { recursive: true, force: true });
+            console.log(`Cleaned up failed AUR clone for ${packageName}`);
           } catch (cleanupError) {
-            console.error(`Error cleaning up partial directory for ${packageName}:`, cleanupError);
+            console.error(`Error cleaning up failed AUR clone for ${packageName}:`, cleanupError);
           }
         }
-        resolve(false);
-      }, 30000); // 30 second timeout
 
-      gitProcess.on('close', (code: number) => {
-        clearTimeout(timeout);
-        
-        if (code === 0) {
-          const gitDir = path.join(repoPath, '.git');
-          const pkgbuildPath = path.join(repoPath, 'PKGBUILD');
-          
-          if (fs.existsSync(gitDir) && fs.existsSync(pkgbuildPath)) {
-            resolve(true);
-          } else {
-            try {
-              fs.rmSync(repoPath, { recursive: true, force: true });
-            } catch (error) {
-              console.error(`Error cleaning up invalid repository for ${packageName}:`, error);
-            }
-            resolve(false);
-          }
+        // Try GitHub mirror
+        console.log(`Trying GitHub mirror for ${packageName}...`);
+        const githubSuccess = await tryClone([
+          'clone',
+          '--branch',
+          packageName,
+          '--single-branch',
+          'https://github.com/archlinux/aur.git',
+          repoPath
+        ], 'GitHub mirror');
+
+        if (githubSuccess && validateRepo()) {
+          console.log(`Successfully cloned ${packageName} from GitHub mirror`);
+          resolve(true);
         } else {
+          // Final cleanup
           if (fs.existsSync(repoPath)) {
             try {
               fs.rmSync(repoPath, { recursive: true, force: true });
-            } catch (error) {
-              console.error(`Error cleaning up partial directory for ${packageName}:`, error);
+              console.log(`Cleaned up failed GitHub clone for ${packageName}`);
+            } catch (cleanupError) {
+              console.error(`Error during final cleanup for ${packageName}:`, cleanupError);
             }
           }
+          console.log(`All clone attempts failed for ${packageName}`);
           resolve(false);
         }
-      });
-
-      gitProcess.on('error', (error) => {
-        clearTimeout(timeout);
-        console.error(`Git process error for ${packageName}:`, error);
-        if (fs.existsSync(repoPath)) {
-          try {
-            fs.rmSync(repoPath, { recursive: true, force: true });
-
-          } catch (cleanupError) {
-            console.error(`Error cleaning up partial directory for ${packageName}:`, cleanupError);
-          }
-        }
-        resolve(false);
       });
     });
   }
