@@ -1,10 +1,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { AURService } from './AURService';
-import { writeFileSync, unlinkSync } from "fs";
 import { execSync } from "child_process";
-import { tmpdir } from "os";
-import { join } from "path";
 
 export interface AURPackage {
   Name: string;
@@ -204,94 +201,109 @@ export class RPCHandler {
     return packages;
   }
 
+  /**
+   * Parse PKGBUILD by sourcing it with bash and extracting variables
+   */
   private parsePKGBUILD(packageName: string, content: string): AURPackage {
     try {
-      const bashScript = [
-        'set -euo pipefail',
-        '',
-        'temp_file=$(mktemp)',
-        "trap 'rm -f \"$temp_file\"' EXIT",
-        '',
-        'cat > "$temp_file" <<\'EOF\'',
-        content, // PKGBUILD content inserted safely
-        'EOF',
-        '',
-        'source "$temp_file"',
-        '',
-        // Echo variables (arrays flattened with [@])
-        'echo "PKGVER=${pkgver-}"',
-        'echo "PKGREL=${pkgrel-}"',
-        'echo "PKGDESC=${pkgdesc-}"',
-        'echo "URL=${url-}"',
-        'echo "MAINTAINER=${maintainer-}"',
-        'echo "LICENSE=${license[@]-}"',
-        'echo "DEPENDS=${depends[@]-}"',
-        'echo "MAKEDEPENDS=${makedepends[@]-}"',
-        'echo "CONFLICTS=${conflicts[@]-}"',
-        'echo "PROVIDES=${provides[@]-}"',
-        'echo "REPLACES=${replaces[@]-}"'
-      ].join('\n');
-
-      const tmpFile = join(tmpdir(), `parse-pkgbuild-${Date.now()}.sh`);
-      writeFileSync(tmpFile, bashScript, { encoding: "utf8" });
-
-      let output: string = "";
+      // Create a temporary directory for our script
+      const tempDir = require('os').tmpdir();
+      const scriptPath = path.join(tempDir, `parse-pkgbuild-${Date.now()}.sh`);
+      const pkgbuildPath = path.join(tempDir, `PKGBUILD-${Date.now()}`);
 
       try {
-        output = execSync(`bash "${tmpFile}"`, { encoding: "utf8", timeout: 10000 });
-      } catch (err) {
-        console.error("Bash failed:", err);
+        // Write the PKGBUILD to a file
+        fs.writeFileSync(pkgbuildPath, content);
+
+        // Create the parsing script
+        const scriptContent = [
+          '#!/bin/bash',
+          'set -e',
+          '',
+          '# Source the PKGBUILD',
+          `source "${pkgbuildPath}"`,
+          '',
+          '# Echo the variables we need',
+          'echo "PKGVER=${pkgver:-}"',
+          'echo "PKGREL=${pkgrel:-}"',
+          'echo "PKGDESC=${pkgdesc:-}"',
+          'echo "URL=${url:-}"',
+          'echo "LICENSE=${license:-}"',
+          'echo "DEPENDS=${depends:-}"',
+          'echo "MAKEDEPENDS=${makedepends:-}"',
+          'echo "CONFLICTS=${conflicts:-}"',
+          'echo "PROVIDES=${provides:-}"',
+          'echo "REPLACES=${replaces:-}"',
+          'echo "MAINTAINER=${maintainer:-}"'
+        ].join('\n');
+
+        fs.writeFileSync(scriptPath, scriptContent);
+        fs.chmodSync(scriptPath, '755');
+
+        // Execute the script
+        const output = execSync(`"${scriptPath}"`, {
+          encoding: 'utf8',
+          timeout: 10000,
+          stdio: ['pipe', 'pipe', 'pipe']
+        });
+
+        // Parse the output into key-value pairs
+        const variables: Record<string, string> = {};
+        output.split('\n').forEach((line: string) => {
+          const match = line.match(/^([A-Z_]+)=(.*)$/);
+          if (match) {
+            variables[match[1]] = match[2];
+          }
+        });
+
+        // Helper function to parse array variables
+        const parseArray = (value: string): string[] => {
+          if (!value) return [];
+
+          // Remove parentheses and split
+          const cleaned = value.replace(/^\(|\)$/g, '').trim();
+          if (!cleaned) return [];
+
+          return cleaned.split(/\s+/)
+          .map(item => item.replace(/['"]/g, '').trim())
+          .filter(item => item.length > 0);
+        };
+
+        // Build the package info
+        const packageInfo: AURPackage = {
+          Name: packageName,
+          PackageBase: packageName,
+          Version: (variables.PKGVER || 'unknown') + '-' + (variables.PKGREL || '1'),
+          Description: variables.PKGDESC || 'No description available',
+          URL: variables.URL || '',
+          Maintainer: variables.MAINTAINER || 'Unknown',
+          NumVotes: 0,
+          Popularity: 0,
+          OutOfDate: null,
+          FirstSubmitted: Math.floor(Date.now() / 1000),
+          LastModified: Math.floor(Date.now() / 1000),
+          License: parseArray(variables.LICENSE),
+          Depends: parseArray(variables.DEPENDS),
+          MakeDepends: parseArray(variables.MAKEDEPENDS),
+          Conflicts: parseArray(variables.CONFLICTS),
+          Provides: parseArray(variables.PROVIDES),
+          Replaces: parseArray(variables.REPLACES),
+          Keywords: []
+        };
+
+        return packageInfo;
       } finally {
-        unlinkSync(tmpFile)
+        // Clean up temporary files
+        try { fs.unlinkSync(scriptPath); } catch (e) {}
+        try { fs.unlinkSync(pkgbuildPath); } catch (e) {}
       }
-
-      console.log("Output:", output);
-
-      // Parse the output into key-value pairs
-      const variables: Record<string, string> = {};
-      output.split("\n").forEach((line: string) => {
-        const match = line.match(/^([A-Z_]+)=(.*)$/);
-        if (match) {
-          variables[match[1]] = match[2];
-        }
-      });
-
-      // Helper to handle array-like vars
-      const parseArray = (value: string): string[] => {
-        if (!value) return [];
-        const cleaned = value.replace(/^\(|\)$/g, "").trim();
-        if (!cleaned) return [];
-        return cleaned
-        .split(/\s+/)
-        .map((item) => item.replace(/['"]/g, "").trim())
-        .filter((item) => item.length > 0);
-      };
-
-      return {
-        Name: packageName,
-        PackageBase: packageName,
-        Version: `${variables.PKGVER || "unknown"}-${variables.PKGREL || "1"}`,
-        Description: variables.PKGDESC || "No description available",
-        URL: variables.URL || "",
-        Maintainer: variables.MAINTAINER || "Unknown",
-        NumVotes: 0,
-        Popularity: 0,
-        OutOfDate: null,
-        FirstSubmitted: Math.floor(Date.now() / 1000),
-        LastModified: Math.floor(Date.now() / 1000),
-        License: parseArray(variables.LICENSE),
-        Depends: parseArray(variables.DEPENDS),
-        MakeDepends: parseArray(variables.MAKEDEPENDS),
-        Conflicts: parseArray(variables.CONFLICTS),
-        Provides: parseArray(variables.PROVIDES),
-        Replaces: parseArray(variables.REPLACES),
-        Keywords: [],
-      };
     } catch (error: any) {
-      console.error(`Error sourcing PKGBUILD for ${packageName}:`, error.message);
+      console.error('Error sourcing PKGBUILD for ' + packageName + ':', error.message);
       if (error.stderr) {
-        console.error("Bash stderr:", error.stderr.toString());
+        console.error('Bash stderr:', error.stderr.toString());
       }
+
+      // Fallback to the original parsing method if bash fails
       return this.fallbackParsePKGBUILD(packageName, content);
     }
   }
