@@ -1,8 +1,8 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { AURService } from './AURService';
-import { execSync } from "child_process";
-
+import { execSync } from 'child_process';
+    
 export interface AURPackage {
   Name: string;
   PackageBase: string;
@@ -210,20 +210,21 @@ export class RPCHandler {
       const tempDir = require('os').tmpdir();
       const scriptPath = path.join(tempDir, `parse-pkgbuild-${Date.now()}.sh`);
       const pkgbuildPath = path.join(tempDir, `PKGBUILD-${Date.now()}`);
-
+      
       try {
         // Write the PKGBUILD to a file
         fs.writeFileSync(pkgbuildPath, content);
-
+        
         // Create the parsing script
         const scriptContent = [
           '#!/bin/bash',
           'set -e',
           '',
           '# Source the PKGBUILD',
-          `source "${pkgbuildPath}"`,
+          `source "${pkgbuildPath}" >/dev/null 2>&1 || true`,
           '',
           '# Echo the variables we need',
+          'echo "EPOCH=${epoch:-}"',
           'echo "PKGVER=${pkgver:-}"',
           'echo "PKGREL=${pkgrel:-}"',
           'echo "PKGDESC=${pkgdesc:-}"',
@@ -236,17 +237,17 @@ export class RPCHandler {
           'echo "REPLACES=${replaces:-}"',
           'echo "MAINTAINER=${maintainer:-}"'
         ].join('\n');
-
+        
         fs.writeFileSync(scriptPath, scriptContent);
         fs.chmodSync(scriptPath, '755');
-
+        
         // Execute the script
         const output = execSync(`"${scriptPath}"`, {
           encoding: 'utf8',
           timeout: 10000,
           stdio: ['pipe', 'pipe', 'pipe']
         });
-
+  
         // Parse the output into key-value pairs
         const variables: Record<string, string> = {};
         output.split('\n').forEach((line: string) => {
@@ -255,25 +256,32 @@ export class RPCHandler {
             variables[match[1]] = match[2];
           }
         });
-
+  
         // Helper function to parse array variables
         const parseArray = (value: string): string[] => {
           if (!value) return [];
-
+          
           // Remove parentheses and split
           const cleaned = value.replace(/^\(|\)$/g, '').trim();
           if (!cleaned) return [];
-
+          
           return cleaned.split(/\s+/)
-          .map(item => item.replace(/['"]/g, '').trim())
-          .filter(item => item.length > 0);
+            .map(item => item.replace(/['"]/g, '').trim())
+            .filter(item => item.length > 0);
         };
-
+  
+        // Build the version string with epoch if present
+        let versionStr = variables.PKGVER || 'unknown';
+        if (variables.EPOCH && variables.EPOCH !== '0') {
+          versionStr = `${variables.EPOCH}:${versionStr}`;
+        }
+        versionStr += `-${variables.PKGREL || '1'}`;
+  
         // Build the package info
         const packageInfo: AURPackage = {
           Name: packageName,
           PackageBase: packageName,
-          Version: (variables.PKGVER || 'unknown') + '-' + (variables.PKGREL || '1'),
+          Version: versionStr,
           Description: variables.PKGDESC || 'No description available',
           URL: variables.URL || '',
           Maintainer: variables.MAINTAINER || 'Unknown',
@@ -290,7 +298,7 @@ export class RPCHandler {
           Replaces: parseArray(variables.REPLACES),
           Keywords: []
         };
-
+  
         return packageInfo;
       } finally {
         // Clean up temporary files
@@ -302,22 +310,29 @@ export class RPCHandler {
       if (error.stderr) {
         console.error('Bash stderr:', error.stderr.toString());
       }
-
+      
       // Fallback to the original parsing method if bash fails
       return this.fallbackParsePKGBUILD(packageName, content);
     }
   }
-
+  
   /**
    * Fallback parsing method if bash sourcing fails
    */
   private fallbackParsePKGBUILD(packageName: string, content: string): AURPackage {
     const lines = content.split('\n');
     
+    // Extract epoch if present
+    const epoch = this.extractValue(lines, 'epoch');
+    let version = this.extractValue(lines, 'pkgver') + "-" + this.extractValue(lines, 'pkgrel') || 'Unknown version';
+    if (epoch && epoch !== '0') {
+      version = `${epoch}:${version}`;
+    }
+    
     const packageInfo: AURPackage = {
       Name: packageName,
       PackageBase: packageName,
-      Version: this.extractValue(lines, 'pkgver') + "-" + this.extractValue(lines, 'pkgrel') || 'Unknown version',
+      Version: version,
       Description: this.extractValue(lines, 'pkgdesc') || 'No description available',
       URL: this.extractValue(lines, 'url') || '',
       Maintainer: this.extractValue(lines, 'Maintainer') || 'Unknown',
