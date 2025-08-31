@@ -185,7 +185,7 @@ export class AURService {
             console.log(`Clone from ${source} timed out for ${packageName}`);
             gitProcess.kill('SIGKILL');
             resolveClone(false);
-          }, 30000);
+          }, 5000);
 
           gitProcess.on('close', (code: number) => {
             clearTimeout(timeout);
