@@ -1,6 +1,10 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { AURService } from './AURService';
+import { writeFileSync, unlinkSync } from "fs";
+import { execSync } from "child_process";
+import { tmpdir } from "os";
+import { join } from "path";
 
 export interface AURPackage {
   Name: string;
@@ -200,16 +204,108 @@ export class RPCHandler {
     return packages;
   }
 
-  /**
-   * Parse PKGBUILD to extract package info
-   */
   private parsePKGBUILD(packageName: string, content: string): AURPackage {
+    try {
+      const bashScript = [
+        'set -euo pipefail',
+        '',
+        'temp_file=$(mktemp)',
+        "trap 'rm -f \"$temp_file\"' EXIT",
+        '',
+        'cat > "$temp_file" <<\'EOF\'',
+        content, // PKGBUILD content inserted safely
+        'EOF',
+        '',
+        'source "$temp_file"',
+        '',
+        // Echo variables (arrays flattened with [@])
+        'echo "PKGVER=${pkgver-}"',
+        'echo "PKGREL=${pkgrel-}"',
+        'echo "PKGDESC=${pkgdesc-}"',
+        'echo "URL=${url-}"',
+        'echo "MAINTAINER=${maintainer-}"',
+        'echo "LICENSE=${license[@]-}"',
+        'echo "DEPENDS=${depends[@]-}"',
+        'echo "MAKEDEPENDS=${makedepends[@]-}"',
+        'echo "CONFLICTS=${conflicts[@]-}"',
+        'echo "PROVIDES=${provides[@]-}"',
+        'echo "REPLACES=${replaces[@]-}"'
+      ].join('\n');
+
+      const tmpFile = join(tmpdir(), `parse-pkgbuild-${Date.now()}.sh`);
+      writeFileSync(tmpFile, bashScript, { encoding: "utf8" });
+
+      let output: string = "";
+
+      try {
+        output = execSync(`bash "${tmpFile}"`, { encoding: "utf8", timeout: 10000 });
+      } catch (err) {
+        console.error("Bash failed:", err);
+      } finally {
+        unlinkSync(tmpFile)
+      }
+
+      console.log("Output:", output);
+
+      // Parse the output into key-value pairs
+      const variables: Record<string, string> = {};
+      output.split("\n").forEach((line: string) => {
+        const match = line.match(/^([A-Z_]+)=(.*)$/);
+        if (match) {
+          variables[match[1]] = match[2];
+        }
+      });
+
+      // Helper to handle array-like vars
+      const parseArray = (value: string): string[] => {
+        if (!value) return [];
+        const cleaned = value.replace(/^\(|\)$/g, "").trim();
+        if (!cleaned) return [];
+        return cleaned
+        .split(/\s+/)
+        .map((item) => item.replace(/['"]/g, "").trim())
+        .filter((item) => item.length > 0);
+      };
+
+      return {
+        Name: packageName,
+        PackageBase: packageName,
+        Version: `${variables.PKGVER || "unknown"}-${variables.PKGREL || "1"}`,
+        Description: variables.PKGDESC || "No description available",
+        URL: variables.URL || "",
+        Maintainer: variables.MAINTAINER || "Unknown",
+        NumVotes: 0,
+        Popularity: 0,
+        OutOfDate: null,
+        FirstSubmitted: Math.floor(Date.now() / 1000),
+        LastModified: Math.floor(Date.now() / 1000),
+        License: parseArray(variables.LICENSE),
+        Depends: parseArray(variables.DEPENDS),
+        MakeDepends: parseArray(variables.MAKEDEPENDS),
+        Conflicts: parseArray(variables.CONFLICTS),
+        Provides: parseArray(variables.PROVIDES),
+        Replaces: parseArray(variables.REPLACES),
+        Keywords: [],
+      };
+    } catch (error: any) {
+      console.error(`Error sourcing PKGBUILD for ${packageName}:`, error.message);
+      if (error.stderr) {
+        console.error("Bash stderr:", error.stderr.toString());
+      }
+      return this.fallbackParsePKGBUILD(packageName, content);
+    }
+  }
+
+  /**
+   * Fallback parsing method if bash sourcing fails
+   */
+  private fallbackParsePKGBUILD(packageName: string, content: string): AURPackage {
     const lines = content.split('\n');
     
     const packageInfo: AURPackage = {
       Name: packageName,
       PackageBase: packageName,
-      Version: '1.0.0',
+      Version: this.extractValue(lines, 'pkgver') + "-" + this.extractValue(lines, 'pkgrel') || 'Unknown version',
       Description: this.extractValue(lines, 'pkgdesc') || 'No description available',
       URL: this.extractValue(lines, 'url') || '',
       Maintainer: this.extractValue(lines, 'Maintainer') || 'Unknown',
@@ -226,7 +322,7 @@ export class RPCHandler {
       Replaces: this.extractArray(lines, 'replaces'),
       Keywords: []
     };
-
+  
     return packageInfo;
   }
 
