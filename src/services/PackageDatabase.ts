@@ -237,24 +237,29 @@ export class PackageDatabase {
     try {
       const fs = require('fs');
       const path = require('path');
-      
+
       let totalSize = 0;
-      
+
       if (fs.existsSync(dirPath)) {
         const items = fs.readdirSync(dirPath);
-        
+
         for (const item of items) {
           const itemPath = path.join(dirPath, item);
-          const stats = fs.statSync(itemPath);
-          
-          if (stats.isDirectory()) {
-            totalSize += this.calculateDirectorySize(itemPath);
-          } else {
-            totalSize += stats.size;
+          try {
+            const stats = fs.statSync(itemPath);
+
+            if (stats.isDirectory()) {
+              totalSize += this.calculateDirectorySize(itemPath);
+            } else {
+              totalSize += stats.size;
+            }
+          } catch (error) {
+            // Skip files that can't be accessed (e.g., deleted during calculation)
+            continue;
           }
         }
       }
-      
+
       return totalSize;
     } catch (error) {
       console.error(`Error calculating size for ${dirPath}:`, error);
